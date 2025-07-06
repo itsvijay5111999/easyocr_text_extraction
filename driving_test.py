@@ -102,11 +102,15 @@ def extract_pa_dl_number(lines, kv_pairs):
 
 def extract_general_dl_number(lines, kv_pairs):
     for k in kv_pairs:
-        if 'DLN' in k or 'DL' in k or 'LIC' in k or 'ID' in k:
+        if any(label in k for label in ['DLN', 'DL', 'LIC', 'ID']):
             value = kv_pairs[k]
             cleaned = re.sub(r'[^A-Z0-9]', '', value)
             if 6 <= len(cleaned) <= 20 and not cleaned.isalpha():
                 return cleaned
+    for line in lines:
+        match = re.search(r'\bWDL[A-Z0-9]{9}\b', line)
+        if match:
+            return match.group(0)
     for line in lines:
         guess = ''.join(re.findall(r'[A-Z0-9]', line))
         if 6 <= len(guess) <= 20 and not guess.isalpha():
@@ -117,25 +121,79 @@ def extract_name(lines):
     LABELS = [
         "DRIVER", "LICENSE", "DLN", "ID", "SEX", "DOB", "CLASS", "RESTR", "EYES",
         "HEIGHT", "CITY", "ZIP", "BIRTH", "EXP", "ADDR", "ORGANDONOR", "VISITPA", "DD",
-        "END", "SAMPLE"
+        "END", "SAMPLE", "ENHANCED"
     ]
     for i, line in enumerate(lines):
         upper = line.upper()
-        if sum(c.isdigit() for c in line) > 3:
-            continue
         if any(label in upper for label in LABELS):
-            continue
-        words = [w for w in line.split() if w.isalpha() and len(w) > 2]
-        if len(words) >= 2:
+            # Check next 2 lines for likely name
+            for offset in [1, 2]:
+                if i + offset < len(lines):
+                    next_line = lines[i + offset]
+                    words = [w for w in next_line.split() if w.isalpha() and len(w) > 1]
+                    if len(words) >= 2:
+                        return " ".join(word.title() for word in words)
+        # Heuristic: line with two words, both capitalized, not a label
+        words = [w for w in line.split() if w.isalpha() and len(w) > 1]
+        if len(words) >= 2 and not any(label in upper for label in LABELS):
             return " ".join(word.title() for word in words)
-        if 'SAMPLE' in upper and i + 1 < len(lines):
-            next_line = lines[i + 1]
-            words = [w for w in next_line.split() if w.isalpha() and len(w) > 2]
-            if len(words) >= 2:
-                return " ".join(word.title() for word in words)
+    # Fallback: first single word not a label
     for line in lines:
-        if 'SAMPLE' in line.upper():
-            return "Sample"
+        upper = line.upper()
+        if not any(label in upper for label in LABELS):
+            words = [w for w in line.split() if w.isalpha() and len(w) > 1]
+            if len(words) == 1:
+                return words[0].title()
+    return "Not Found"
+
+def extract_exp_date(lines, kv_pairs):
+    # Try key-value pairs first
+    for k in kv_pairs:
+        if 'EXP' in k:
+            val = kv_pairs[k]
+            m = re.search(r'\d{2}[/-]\d{2}[/-]\d{4}', val)
+            if m:
+                return m.group(0)
+    # Search all lines for date pattern, prefer after "EXP"
+    for idx, line in enumerate(lines):
+        if "EXP" in line.upper():
+            # Check this and next line for a date
+            for offset in [0, 1]:
+                if idx + offset < len(lines):
+                    m = re.search(r'(\d{2}[/-]\d{2}[/-]\d{4})', lines[idx + offset])
+                    if m:
+                        return m.group(1)
+                    m2 = re.search(r'(\d{2}[/-]\d{4})', lines[idx + offset])
+                    if m2:
+                        return m2.group(1)
+    # Fallback: any date pattern in all lines
+    for line in lines:
+        m = re.search(r'(\d{2}[/-]\d{2}[/-]\d{4})', line)
+        if m:
+            return m.group(1)
+        m2 = re.search(r'(\d{2}[/-]\d{4})', line)
+        if m2:
+            return m2.group(1)
+    return "Not Found"
+
+def extract_sex(lines, kv_pairs):
+    for k in kv_pairs:
+        if 'SEX' in k:
+            val = kv_pairs[k].strip().upper()
+            if val in ['M', 'F']:
+                return val
+    for idx, line in enumerate(lines):
+        m = re.search(r'SEX[:\s-]*([MF])', line, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        if 'SEX' in line.upper() and idx + 1 < len(lines):
+            next_val = lines[idx + 1].strip().upper()
+            if next_val in ['M', 'F']:
+                return next_val
+    # Fallback: isolated M/F
+    for line in lines:
+        if line.strip().upper() in ['M', 'F']:
+            return line.strip().upper()
     return "Not Found"
 
 def parse_driver_license_details(ocr_result_lines):
@@ -154,32 +212,8 @@ def parse_driver_license_details(ocr_result_lines):
     else:
         details['DL No'] = extract_general_dl_number(ocr_result_lines, kv_pairs)
 
-    for k in kv_pairs:
-        if 'EXP' in k:
-            val = kv_pairs[k]
-            if re.match(r'\d{2}/\d{2}/\d{4}', val) or re.match(r'\d{2}/\d{2}/\d{2}', val):
-                details['Exp Date'] = val
-                break
-    if details['Exp Date'] == "Not Found":
-        for line in ocr_result_lines:
-            m = re.search(r'(\d{2}/\d{2}/\d{4})', line)
-            if m:
-                details['Exp Date'] = m.group(1)
-                break
-
-    for k in kv_pairs:
-        if 'SEX' in k:
-            val = kv_pairs[k].strip().upper()
-            if val in ['M', 'F']:
-                details['Sex'] = val
-                break
-    if details['Sex'] == "Not Found":
-        for line in ocr_result_lines:
-            m = re.search(r'SEX[:\s-]*([MF])', line, re.IGNORECASE)
-            if m:
-                details['Sex'] = m.group(1).upper()
-                break
-
+    details['Exp Date'] = extract_exp_date(ocr_result_lines, kv_pairs)
+    details['Sex'] = extract_sex(ocr_result_lines, kv_pairs)
     details['Name'] = extract_name(ocr_result_lines)
 
     return details, kv_pairs
@@ -206,7 +240,6 @@ def extract_text_from_images(image_paths):
         ocr_result = reader.readtext(processed_img, detail=0)
         print(f"Raw OCR Result for {os.path.basename(image_path)}:\n{ocr_result}")
         details, kv_pairs = parse_driver_license_details(ocr_result)
-        # print(f"Key-Value OCR Result for {os.path.basename(image_path)}:\n{kv_pairs}")
         print(f"Extracted Specific Details for {os.path.basename(image_path)}:")
         for key, value in details.items():
             print(f"  {key}: {value}")
@@ -214,8 +247,6 @@ def extract_text_from_images(image_paths):
         # Save JSON output
         json_filename = os.path.splitext(os.path.basename(image_path))[0] + ".json"
         save_json_output(output_folder, json_filename, {
-            # "raw_ocr": ocr_result,
-            # "key_value_ocr": kv_pairs,
             "extracted_details": details
         })
 
@@ -225,7 +256,6 @@ def extract_text_from_images(image_paths):
         print("JSON output:")
         print(json.dumps({
             "raw_ocr": ocr_result,
-            # "key_value_ocr": kv_pairs,
             "extracted_details": details
         }, indent=4, ensure_ascii=False))
     return all_extracted_details
